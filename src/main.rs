@@ -1,8 +1,8 @@
-use std::{path::PathBuf, time::SystemTime};
+use std::{path::PathBuf, sync::Arc, time::SystemTime};
 
 use anyhow::Context;
 use api_helpers::SchoologyRequestHelper;
-use export::{export_attachments, export_school, export_user};
+use export::{export_attachments, export_directory, export_school, export_user};
 use http::Extensions;
 use log::{debug, info};
 use reqwest::{Client, Request, Response};
@@ -14,30 +14,13 @@ use tokio::io::{stdin, AsyncBufReadExt, BufReader};
 mod api_helpers;
 mod export;
 
-type Map = serde_json::Map<String, Value>;
-
-trait MapHelper {
+trait ValueHelper {
     fn get_string(&self, key: &str) -> Option<String>;
     fn get_int(&self, key: &str) -> Option<i64>;
     fn get_array(&self, key: &str) -> Option<Vec<Value>>;
 }
 
-impl MapHelper for Map {
-    fn get_string(&self, key: &str) -> Option<String> {
-        self.get(key)
-            .and_then(|x| x.as_str())
-            .map(|x| x.to_string())
-    }
-
-    fn get_int(&self, key: &str) -> Option<i64> {
-        self.get(key).and_then(|x| x.as_i64())
-    }
-
-    fn get_array(&self, key: &str) -> Option<Vec<Value>> {
-        self.get(key).and_then(|x| x.as_array()).cloned()
-    }
-}
-impl MapHelper for Value {
+impl ValueHelper for Value {
     fn get_string(&self, key: &str) -> Option<String> {
         self.get(key)
             .and_then(|x| x.as_str())
@@ -164,7 +147,7 @@ async fn login(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Debug)
+        .filter_level(log::LevelFilter::Info)
         .parse_default_env()
         .init();
 
@@ -174,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
         .with(LoggingMiddleware)
         .with(RetryTransientMiddleware::new_with_policy(policy))
         .build();
+    let client = Arc::new(client);
 
     let creds =
         tokio::fs::read_to_string(std::env::args().nth(1).context("path to creds not found")?)
@@ -247,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
         .execute(Request::get("app-user-info")?.into_schoology(&token_info)?)
         .await
         .context("failed to request uid")?
-        .json::<Map>()
+        .json::<Value>()
         .await?
         .get_int("api_uid")
         .context("failed to get uid")?;
@@ -294,11 +278,12 @@ async fn main() -> anyhow::Result<()> {
     let mut updates_url = "https://api.schoology.com/v1/recent/?extended&options&start=0&limit=50&created_offset=0&with_attachments=TRUE&richtext=1".to_string();
     let mut updates_cnt = 0;
     loop {
+        info!("exporting updates ({})", updates_cnt);
         let update_info = client
             .execute(Request::get_raw(&updates_url)?.into_schoology(&token_info)?)
             .await
             .context("failed to request update info")?
-            .json::<Map>()
+            .json::<Value>()
             .await?;
 
         for update in update_info
@@ -348,11 +333,12 @@ async fn main() -> anyhow::Result<()> {
     let mut parsed_sent_messages = false;
     let mut messages_cnt = 0;
     loop {
+        info!("exporting messages ({})", messages_cnt);
         let messages_info = client
             .execute(Request::get_raw(&messages_url)?.into_schoology(&token_info)?)
             .await
             .context("failed to request messages info")?
-            .json::<Map>()
+            .json::<Value>()
             .await?;
 
         for message in messages_info
@@ -370,7 +356,7 @@ async fn main() -> anyhow::Result<()> {
                 .execute(Request::get_raw(&message_url)?.into_schoology(&token_info)?)
                 .await
                 .context("failed to request message info")?
-                .json::<Map>()
+                .json::<Value>()
                 .await?;
 
             tokio::fs::write(
@@ -415,7 +401,7 @@ async fn main() -> anyhow::Result<()> {
         .execute(Request::get(&format!("users/{uid}/sections"))?.into_schoology(&token_info)?)
         .await
         .context("failed to request courses")?
-        .json::<Map>()
+        .json::<Value>()
         .await?;
 
     tokio::fs::write(
@@ -432,6 +418,8 @@ async fn main() -> anyhow::Result<()> {
         let course_dir = export_courses_dir.join(&course_id);
         tokio::fs::create_dir(&course_dir).await?;
 
+        info!("exporting course {}", course_id);
+
         let course_info_url = course
             .get("links")
             .and_then(|x| x.get_string("self"))
@@ -440,7 +428,7 @@ async fn main() -> anyhow::Result<()> {
             .execute(Request::get_raw(&course_info_url)?.into_schoology(&token_info)?)
             .await
             .context("failed to get course info")?
-            .json::<Map>()
+            .json::<Value>()
             .await?;
         tokio::fs::write(
             course_dir.join("info.json"),
@@ -456,7 +444,7 @@ async fn main() -> anyhow::Result<()> {
             client
                 .execute(Request::get_raw(&course_banner_url)?.into_schoology(&token_info)?)
                 .await
-                .context("failed to request course banner url")?
+                .context("failed to request course banner")?
                 .bytes()
                 .await?,
         )
@@ -469,7 +457,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
             .context("failed to get course grades")?
-            .json::<Map>()
+            .json::<Value>()
             .await?;
         tokio::fs::write(
             course_dir.join("grades.json"),
@@ -478,7 +466,20 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
         let course_files_root = course_dir.join("files");
-        tokio::fs::create_dir(&course_files_root).await?;
+
+        let course_files_info = client
+            .execute(
+                Request::get(&format!("courses/{course_id}/folder/0"))?
+                    .into_schoology(&token_info)?,
+            )
+            .await
+            .context("failed to request course files")?
+            .json::<Value>()
+            .await?;
+
+        export_directory(course_files_root, &client, &token_info, &course_files_info)
+            .await
+            .context("failed to export course files")?;
     }
 
     Ok(())
