@@ -464,7 +464,7 @@ async fn main() -> anyhow::Result<()> {
 
         let course_grades_info = client
             .execute(
-                Request::get_raw(&format!("users/{uid}/grades/?section_id={course_id}"))?
+                Request::get(&format!("users/{uid}/grades/?section_id={course_id}"))?
                     .into_schoology(&token_info)?,
             )
             .await
