@@ -110,9 +110,12 @@ pub async fn export_attachments(
             let file_name = attachment
                 .get_string("filename")
                 .context("failed to get file attachment name")?;
+            let file_id = attachment
+                .get_int("id")
+                .context("failed to get file attachment id")?;
             info!("exporting attachment {:?}", file_name);
             tokio::fs::write(
-                export_path_mapper(file_name.replace("/", "_")),
+                export_path_mapper(format!("{}_{}", file_id, file_name.replace("/", "_"))),
                 client
                     .execute(Request::get_raw(&download_url)?.into_schoology(token_info)?)
                     .await
@@ -139,6 +142,7 @@ pub async fn export_directory(
         return Ok(());
     };
     for item in items {
+        let item_id = item.get_int("id").context("failed to get item id")?;
         let item_title = item
             .get_string("title")
             .context("failed to get item title")?;
@@ -147,7 +151,8 @@ pub async fn export_directory(
         let item_url = item
             .get_string("location")
             .context("failed to get item url")?;
-        let item_directory = export_path.join(item_title.replace("/", "_"));
+        let item_directory =
+            export_path.join(format!("{}_{}", item_id, item_title.replace("/", "_")));
 
         match item
             .get_string("type")
@@ -179,6 +184,11 @@ pub async fn export_directory(
                     page_info
                         .get_string("body")
                         .context("failed to get page body")?,
+                )
+                .await?;
+                tokio::fs::write(
+                    item_directory.join("info.json"),
+                    serde_json::to_string_pretty(&page_info)?,
                 )
                 .await?;
                 export_attachments(
@@ -215,7 +225,7 @@ pub async fn export_directory(
                 )
                 .await?;
             }
-            "assignment" => {
+            "assignment" | "assessment_v2" => {
                 let assignment_info = client
                     .execute(
                         Request::get_raw(&format!("{item_url}?with_attachments=TRUE&richtext=1"))?
@@ -283,13 +293,64 @@ pub async fn export_directory(
                     .await
                     .context("failed to request assignment grade")?
                     .json::<Value>()
-                    .await.context("abc")?;
+                    .await
+                    .context("abc")?;
 
                 tokio::fs::write(
                     item_directory.join("grade.json"),
                     serde_json::to_string_pretty(&assignment_grade)?,
                 )
                 .await?;
+            }
+            "discussion" => {
+                let discussion_info = client
+                    .execute(
+                        Request::get_raw(
+                            &(format!("{item_url}?with_attachments=TRUE&richtext=1")),
+                        )?
+                        .into_schoology(token_info)?,
+                    )
+                    .await
+                    .context("failed to get discussion info")?
+                    .json::<Value>()
+                    .await?;
+
+                tokio::fs::create_dir(&item_directory).await?;
+                tokio::fs::write(
+                    item_directory.join("info.json"),
+                    serde_json::to_string_pretty(&discussion_info)?,
+                )
+                .await?;
+
+                let discussion_replies = client
+                    .execute(
+                        Request::get_raw(
+                            &(item_url + "/comments?with_attachments=TRUE&richtext=1"),
+                        )?
+                        .into_schoology(token_info)?,
+                    )
+                    .await
+                    .context("failed to get discussion info")?
+                    .json::<Value>()
+                    .await?;
+                tokio::fs::write(
+                    item_directory.join("replies.json"),
+                    serde_json::to_string_pretty(&discussion_replies)?,
+                )
+                .await?;
+                for reply in discussion_replies
+                    .get_array("comment")
+                    .context("failed to get discussion replies")?
+                {
+                    let reply_id = reply.get_int("id").context("failed to get reply id")?;
+                    export_attachments(
+                        &|file_name| item_directory.join(format!("reply_{reply_id}_{file_name}")),
+                        client,
+                        token_info,
+                        &reply,
+                    )
+                    .await?;
+                }
             }
             x => {
                 error!("item: {:#?}", item);

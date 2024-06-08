@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc, time::SystemTime};
+use std::{path::PathBuf, sync::Arc, time::{Instant, SystemTime}};
 
 use anyhow::Context;
 use api_helpers::SchoologyRequestHelper;
@@ -8,7 +8,7 @@ use log::{debug, info};
 use reqwest::{Client, Request, Response};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::{stdin, AsyncBufReadExt, BufReader};
 
 mod api_helpers;
@@ -151,6 +151,8 @@ async fn main() -> anyhow::Result<()> {
         .parse_default_env()
         .init();
 
+    let start = Instant::now();
+
     let client = Client::new();
     let policy = ExponentialBackoff::builder().build_with_max_retries(10);
     let client = ClientBuilder::new(client)
@@ -168,6 +170,19 @@ async fn main() -> anyhow::Result<()> {
     let domain = creds.next().context("no schoology domain")?;
     let client_token = creds.next().context("no app token")?;
     let client_secret = creds.next().context("no app secret")?;
+
+    let manual_courses_list = if let Some(list) = creds.next() {
+        if !list.is_empty() {
+            list.split(',')
+                .map(str::parse)
+                .collect::<Result<Vec<i64>, _>>()?
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
     let user_token = creds.next();
     let user_secret = creds.next();
 
@@ -410,10 +425,19 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    for course in courses
+    let mut courses_list = courses
         .get_array("section")
-        .context("failed to get courses")?
-    {
+        .context("failed to get courses")?;
+    courses_list.extend(manual_courses_list.iter().map(|x| {
+        json!({
+            "id": x.to_string(),
+            "links": {
+                "self": format!("https://api.schoology.com/v1/sections/{x}")
+            }
+        })
+    }));
+
+    for course in courses_list {
         let course_id = course.get_string("id").context("failed to get course id")?; // ???
         let course_dir = export_courses_dir.join(&course_id);
         tokio::fs::create_dir(&course_dir).await?;
@@ -481,6 +505,10 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("failed to export course files")?;
     }
+
+    let end = Instant::now();
+
+    info!("Exported in {}", humantime::format_duration(end.duration_since(start)));
 
     Ok(())
 }
