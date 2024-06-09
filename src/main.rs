@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc, time::{Instant, SystemTime}};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Instant, SystemTime},
+};
 
 use anyhow::Context;
 use api_helpers::SchoologyRequestHelper;
@@ -170,19 +174,6 @@ async fn main() -> anyhow::Result<()> {
     let domain = creds.next().context("no schoology domain")?;
     let client_token = creds.next().context("no app token")?;
     let client_secret = creds.next().context("no app secret")?;
-
-    let manual_courses_list = if let Some(list) = creds.next() {
-        if !list.is_empty() {
-            list.split(',')
-                .map(str::parse)
-                .collect::<Result<Vec<i64>, _>>()?
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
-
     let user_token = creds.next();
     let user_secret = creds.next();
 
@@ -413,7 +404,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let courses = client
-        .execute(Request::get(&format!("users/{uid}/sections"))?.into_schoology(&token_info)?)
+        .execute(
+            Request::get(&format!("users/{uid}/sections?include_past=1"))?
+                .into_schoology(&token_info)?,
+        )
         .await
         .context("failed to request courses")?
         .json::<Value>()
@@ -425,17 +419,17 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    let mut courses_list = courses
+    let courses_list = courses
         .get_array("section")
         .context("failed to get courses")?;
-    courses_list.extend(manual_courses_list.iter().map(|x| {
-        json!({
-            "id": x.to_string(),
-            "links": {
-                "self": format!("https://api.schoology.com/v1/sections/{x}")
-            }
-        })
-    }));
+
+    debug!(
+        "courses to export: {:?}",
+        courses_list
+            .iter()
+            .map(|x| x.get_string("id").unwrap_or_default())
+            .collect::<Vec<_>>()
+    );
 
     for course in courses_list {
         let course_id = course.get_string("id").context("failed to get course id")?; // ???
@@ -508,7 +502,10 @@ async fn main() -> anyhow::Result<()> {
 
     let end = Instant::now();
 
-    info!("Exported in {}", humantime::format_duration(end.duration_since(start)));
+    info!(
+        "Exported in {}",
+        humantime::format_duration(end.duration_since(start))
+    );
 
     Ok(())
 }
