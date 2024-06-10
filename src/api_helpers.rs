@@ -1,10 +1,12 @@
 use std::time::SystemTime;
 
 use anyhow::Context;
-use reqwest::{header::HeaderValue, Method, Request, Url};
+use reqwest::{header::HeaderValue, Body, Method, Request, Url};
+use reqwest_middleware::ClientWithMiddleware;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::TokenInfo;
+use crate::{TokenInfo, ValueHelper};
 
 fn generate_oauth_header(token_info: &TokenInfo) -> anyhow::Result<String> {
     let TokenInfo {
@@ -21,6 +23,30 @@ fn generate_oauth_header(token_info: &TokenInfo) -> anyhow::Result<String> {
         .context("failed to get system time")?
         .as_secs();
     Ok(format!("OAuth realm=\"Schoology API\",oauth_consumer_key=\"{}\",oauth_token=\"{}\",oauth_nonce=\"{}\",oauth_timestamp=\"{}\",oauth_signature_method=\"PLAINTEXT\",oauth_version=\"1.0\",oauth_signature=\"{}%26{}\"", client_token, user_token.unwrap_or(""), nonce, timestamp, client_secret, user_secret.unwrap_or("")))
+}
+
+pub async fn get(
+    client: &ClientWithMiddleware,
+    token_info: &TokenInfo,
+    url: &str,
+) -> anyhow::Result<Value> {
+    Ok(client
+        .execute(Request::get(url)?.into_schoology(token_info)?)
+        .await?
+        .json()
+        .await?)
+}
+
+pub async fn get_raw(
+    client: &ClientWithMiddleware,
+    token_info: &TokenInfo,
+    url: &str,
+) -> anyhow::Result<Value> {
+    Ok(client
+        .execute(Request::get_raw(url)?.into_schoology(token_info)?)
+        .await?
+        .json()
+        .await?)
 }
 
 pub trait SchoologyRequestHelper {

@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Context;
-use api_helpers::SchoologyRequestHelper;
+use api_helpers::{get, get_raw, SchoologyRequestHelper};
 use export::{export_attachments, export_directory, export_school, export_user};
 use http::Extensions;
 use log::{debug, info};
@@ -242,6 +242,8 @@ async fn main() -> anyhow::Result<()> {
         .get_int("api_uid")
         .context("failed to get uid")?;
 
+    info!("logged in as user {}", uid);
+
     tokio::fs::write(export_users_dir.join("self"), uid.to_string()).await?;
 
     let mut exported_users: Vec<i64> = Vec::new();
@@ -285,12 +287,9 @@ async fn main() -> anyhow::Result<()> {
     let mut updates_cnt = 0;
     loop {
         info!("exporting updates ({})", updates_cnt);
-        let update_info = client
-            .execute(Request::get_raw(&updates_url)?.into_schoology(&token_info)?)
+        let update_info = get_raw(&client, &token_info, &updates_url)
             .await
-            .context("failed to request update info")?
-            .json::<Value>()
-            .await?;
+            .context("failed to request update info")?;
 
         for update in update_info
             .get_array("update")
@@ -340,12 +339,9 @@ async fn main() -> anyhow::Result<()> {
     let mut messages_cnt = 0;
     loop {
         info!("exporting messages ({})", messages_cnt);
-        let messages_info = client
-            .execute(Request::get_raw(&messages_url)?.into_schoology(&token_info)?)
+        let messages_info = get_raw(&client, &token_info, &messages_url)
             .await
-            .context("failed to request messages info")?
-            .json::<Value>()
-            .await?;
+            .context("failed to request messages info")?;
 
         for message in messages_info
             .get_array("message")
@@ -403,15 +399,13 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let courses = client
-        .execute(
-            Request::get(&format!("users/{uid}/sections?include_past=1"))?
-                .into_schoology(&token_info)?,
-        )
-        .await
-        .context("failed to request courses")?
-        .json::<Value>()
-        .await?;
+    let courses = get(
+        &client,
+        &token_info,
+        &format!("users/{uid}/sections?include_past=1"),
+    )
+    .await
+    .context("failed to request courses")?;
 
     tokio::fs::write(
         export_courses_dir.join("info.json"),
